@@ -24,6 +24,7 @@ exports.dialogflowFirebaseFulfillment = functions.https.onRequest((request, resp
 function processV1Request(request, response) {
   let action = request.body.result.action; // https://dialogflow.com/docs/actions-and-parameters
   let parameters = request.body.result.parameters; // https://dialogflow.com/docs/actions-and-parameters
+  console.log(parameters);
   let inputContexts = request.body.result.contexts; // https://dialogflow.com/docs/contexts
   let requestSource = (request.body.originalRequest) ? request.body.originalRequest.source : undefined;
   const googleAssistantRequest = 'google'; // Constant to identify Google Assistant requests
@@ -31,7 +32,6 @@ function processV1Request(request, response) {
     request: request,
     response: response
   });
-  let access_token = app.getUser().access_token;
   const actionsApp = new ActionsSdkApp({
     request: request,
     response: response
@@ -40,88 +40,103 @@ function processV1Request(request, response) {
   const actionHandlers = {
     'signin': () => {
       console.log('signin');
-      if (requestSource === googleAssistantRequest) {
-        sendGoogleResponse('This is the signin action');
+      if (app.getSignInStatus() === app.SignInStatus.OK) {
+        if (app.userStorage['previous_intent']) {
+          actionHandlers[app.userStorage.previous_intent]();
+        } else {
+          actionHandlers["create.alarm"]();
+        }
       } else {
-        sendResponse('This is the signin action');
+        let responseString = "Sorry, you must sign in to SafeTrek to use alarms.";
+        if (requestSource === googleAssistantRequest) {
+          sendGoogleResponse(responseString);
+        } else {
+          sendResponse(responseString);
+        }
       }
     },
     'create.alarm': () => {
       console.log('create.alarm');
-      if (!app.getDeviceLocation()) {
-        // let state = {
-        //   "previous_intent": "create.alarm"
-        // };
+      if (!app.getUser()) {
+        app.userStorage.parameters = parameters;
         app.userStorage.previous_intent = "create.alarm";
-        app.askForPermission('To locate you', app.SupportedPermissions.DEVICE_PRECISE_LOCATION);
+        app.askForSignIn();
       } else {
-        let deviceCoordinates = app.getDeviceLocation().coordinates;
-        console.log(deviceCoordinates);
-
-        // createAlarm(app);
-        // let deviceCoordinates = app.getDeviceLocation().coordinates;
-        // console.log(deviceCoordinates);
-        let requestData = JSON.stringify({
-          "services": {
-            "police": true,
-            "fire": false,
-            "medical": false
-          },
-          "location.coordinates": {
-            "lat": deviceCoordinates.latitude,
-            "lng": deviceCoordinates.longitude,
-            "accuracy": 5
+        if (!app.getDeviceLocation()) {
+          app.userStorage.parameters = parameters;
+          app.userStorage.previous_intent = "create.alarm";
+          app.askForPermission('To locate you', app.SupportedPermissions.DEVICE_PRECISE_LOCATION);
+        } else {
+          let deviceCoordinates = app.getDeviceLocation().coordinates;
+          let p = parameters.type ? parameters : app.userStorage.parameters;
+          let police = p['type'].includes('police');
+          let fire = p['type'].includes('fire');
+          let medical = p['type'].includes('medical');
+          if (!(police || fire || medical)) {
+            police = true;
           }
-        });
-        let options = {
-          // hostname: "https://api.safetrek.io/v1/alarms",
-          hostname: "api-sandbox.safetrek.io",
-          path: "/v1/alarms",
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + app.getUser().access_token,
-            "Content-Type": "application/json",
-          }
-        };
-        console.log("User storage 0:", app.userStorage);
-        let req = https.request(options, function(res) {
-          res.setEncoding('utf8');
-          res.on('data', function(body) {
-            console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
-            // if (res.statusCode == 201) {
-            // console.log("THIS IS A TEST CAN YOU HEAR ME");
-            // console.log("Body 201: ", JSON.parse(body));
-            let id = JSON.parse(body).id;
-            // console.log("ID 201: ", id);
-            // console.log("User storage 1:", app.userStorage);
-            app.userStorage.id = id;
-            // console.log("User storage ID:", app.userStorage.id);
-            // console.log("User storage 2:", app.userStorage);
-            // }
-            let responseString = "We have sent the police to your location\n\n"+JSON.stringify(body);
-            let bodyString = JSON.stringify(body);
-            if (requestSource === googleAssistantRequest) {
-              sendGoogleResponse(responseString);
-            } else {
-              sendResponse(responseString);
+          let requestData = JSON.stringify({
+            "services": {
+              "police": police,
+              "fire": fire,
+              "medical": medical
+            },
+            "location.coordinates": {
+              "lat": deviceCoordinates.latitude,
+              "lng": deviceCoordinates.longitude,
+              "accuracy": 5
             }
           });
-        });
-        console.log("Request data", requestData);
-        req.on('error', function(e) {
-          console.log('problem with request: ' + e.message);
-        });
-        req.write(requestData);
-        req.end();
+          let options = {
+            // hostname: "https://api.safetrek.io/v1/alarms",
+            hostname: "api-sandbox.safetrek.io",
+            path: "/v1/alarms",
+            method: "POST",
+            headers: {
+              "Authorization": "Bearer " + app.getUser().access_token,
+              "Content-Type": "application/json",
+            }
+          };
+          let req = https.request(options, function(res) {
+            res.setEncoding('utf8');
+            res.on('data', function(body) {
+              let bodyObj = JSON.parse(body);
+              app.userStorage.id = bodyObj.id;
+              var string;
+              var details = "";
+              console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
+              if (res.statusCode == 201) {
+                string = "We have sent help. ";
+                details += "The following services are coming:" + (bodyObj.services.police ? " police" : "") + (bodyObj.services.fire ? " fire" : "") + (bodyObj.services.medical ? " medical" : "") + ". ";
+                details += "You location is: " + bodyObj.locations.coordinates[0].lat + ", " + bodyObj.locations.coordinates[0].lng + ". ";
+                details += "This alarm was created at " + (new Date(bodyObj.created_at)).toString() + ". ";
+              } else {
+                string = "There's an error creating the alarm.";
+                details = JSON.stringify(body);
+              }
+              response = {
+                speech: string + details,
+                displayText: string + details
+              };
+              if (requestSource === googleAssistantRequest) {
+                sendGoogleResponse(response);
+              } else {
+                sendResponse(response);
+              }
+            });
+          });
+          req.on('error', function(e) {
+            console.log('problem with request: ' + e.message);
+          });
+          req.write(requestData);
+          req.end();
+        }
       }
     },
     'user.info': () => {
-      // const dialogState = actionsApp.getDialogState().previous_intent;
       if (app.isPermissionGranted()) {
-        console.log("actionsApp.getDialogState()", app.userStorage);
-        console.log("previous_intent", app.userStorage.previous_intent);
-        // console.log("action", actionHandlers[dialogState]);
-        if (app.userStorage.previous_intent) {
+        console.log("app.userStorage", app.userStorage);
+        if (app.userStorage['previous_intent']) {
           actionHandlers[app.userStorage.previous_intent]();
         } else {
           actionHandlers["create.alarm"]();
@@ -137,141 +152,166 @@ function processV1Request(request, response) {
     },
     'update.alarm.status': () => {
       console.log('update.alarm.status');
-      if (!app.getDeviceLocation()) {
-        // let state = {
-        //   "previous_intent": "update.alarm.status"
-        // };
+      if (!app.getUser()) {
         app.userStorage.previous_intent = "update.alarm.status";
-        app.askForPermission('To locate you', app.SupportedPermissions.DEVICE_PRECISE_LOCATION);
+        app.askForSignIn();
       } else {
-        let deviceCoordinates = app.getDeviceLocation().coordinates;
-        console.log(deviceCoordinates);
-        // console.log("User storage 3:", app.userStorage);
-        // console.log("User storage ID:", app.userStorage.id);
-        // console.log("User storage 4:", app.userStorage);
-        if (!app.userStorage.id) {
-          console.log("ID NULL FAILURE");
+        if (!app.getDeviceLocation()) {
+          app.userStorage.previous_intent = "update.alarm.status";
+          app.askForPermission('To locate you', app.SupportedPermissions.DEVICE_PRECISE_LOCATION);
         } else {
-          let requestData = JSON.stringify({
-            "status": "CANCELED"
-          });
-          let options = {
-            // hostname: "https://api.safetrek.io/v1/alarms",
-            hostname: "api-sandbox.safetrek.io",
-            path: "/v1/alarms/" + app.userStorage.id + "/status",
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": "Bearer " + app.getUser().access_token,
-            }
-          };
-          let req = https.request(options, function(res) {
-            // 200
-            res.setEncoding('utf8');
-            res.on('data', function(body) {
-              console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
-              let responseString = "We've canceled your alarm.\n\n"+JSON.stringify(body);
-              if (requestSource === googleAssistantRequest) {
-                sendGoogleResponse(responseString);
-              } else {
-                sendResponse(responseString);
-              }
+          let deviceCoordinates = app.getDeviceLocation().coordinates;
+          console.log(deviceCoordinates);
+          if (!app.userStorage.id) {
+            console.log("ID NULL FAILURE");
+          } else {
+            let requestData = JSON.stringify({
+              "status": "CANCELED"
             });
-          });
-          req.on('error', function(e) {
-            console.log('problem with request: ' + e.message);
-          });
-          req.write(requestData);
-          req.end();
+            let options = {
+              // hostname: "https://api.safetrek.io/v1/alarms",
+              hostname: "api-sandbox.safetrek.io",
+              path: "/v1/alarms/" + app.userStorage.id + "/status",
+              method: "PUT",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + app.getUser().access_token,
+              }
+            };
+            let req = https.request(options, function(res) {
+              res.setEncoding('utf8');
+              res.on('data', function(body) {
+                var string;
+                var details = "";
+                if (res.statusCode == 200) {
+                  string = "We've canceled your alarm. Thank you for using SafeTrek to stay out of danger. ";
+                } else {
+                  console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
+                  string = "We were unable to cancel your alarm. ";
+                  details = body;
+                }
+                let response = {
+                  speech: string,
+                  displayText: string + details
+                };
+                if (requestSource === googleAssistantRequest) {
+                  sendGoogleResponse(response);
+                } else {
+                  sendResponse(response);
+                }
+              });
+            });
+            req.on('error', function(e) {
+              console.log('problem with request: ' + e.message);
+            });
+            req.write(requestData);
+            req.end();
+          }
         }
       }
     },
     'update.alarm.location': () => {
       console.log('update.alarm.location');
-      if (!app.getDeviceLocation()) {
-        let state = {
-          "previous_intent": "update.alarm.location"
-        };
-        app.askForPermission('To locate you', app.SupportedPermissions.DEVICE_PRECISE_LOCATION, state);
+      if (!app.getUser()) {
+        app.userStorage.previous_intent = "update.alarm.location";
+        app.askForSignIn();
       } else {
-        let deviceCoordinates = app.getDeviceLocation().coordinates;
-        console.log(deviceCoordinates);
-        if (!app.userStorage.id) {
-          console.log("ID NULL FAILURE");
+        if (!app.getDeviceLocation()) {
+          app.userStorage.previous_intent = "update.alarm.location";
+          app.askForPermission('To locate you', app.SupportedPermissions.DEVICE_PRECISE_LOCATION);
         } else {
-          let requestData = JSON.stringify({
-            "coordinates": {
-              "lat": deviceCoordinates.latitude,
-              "lng": deviceCoordinates.longitude,
-              "accuracy": 5
-            }
-          });
-          let options = {
-            // hostname: "https://api.safetrek.io/v1/alarms",
-            hostname: "api-sandbox.safetrek.io",
-            path: "/v1/alarms/" + app.userStorage.id + "/locations",
-            method: "POST",
-            headers: {
-              "Authorization": "Bearer " + app.getUser().access_token,
-              "Content-Type": "application/json"
-            }
-          };
-          let req = https.request(options, function(res) {
-            // 200
-            res.setEncoding('utf8');
-            res.on('data', function(body) {
-              console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
-              let string = "We've updated your location.\n\n"+JSON.stringify(body);
-              if (requestSource === googleAssistantRequest) {
-                sendGoogleResponse(string);
-              } else {
-                sendResponse(string);
+          let deviceCoordinates = app.getDeviceLocation().coordinates;
+          if (!app.userStorage.id) {
+            console.log("ID NULL FAILURE");
+          } else {
+            let requestData = JSON.stringify({
+              "coordinates": {
+                "lat": deviceCoordinates.latitude,
+                "lng": deviceCoordinates.longitude,
+                "accuracy": 5
               }
             });
-          });
-          req.on('error', function(e) {
-            console.log('problem with request: ' + e.message);
-          });
-          req.write(requestData);
-          req.end();
+            let options = {
+              // hostname: "https://api.safetrek.io/v1/alarms",
+              hostname: "api-sandbox.safetrek.io",
+              path: "/v1/alarms/" + app.userStorage.id + "/locations",
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer " + app.getUser().access_token,
+                "Content-Type": "application/json"
+              }
+            };
+            let req = https.request(options, function(res) {
+              res.setEncoding('utf8');
+              res.on('data', function(body) {
+                let bodyObj = JSON.parse(body);
+                var string;
+                var details = "";
+                console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
+                if (res.statusCode == 200) {
+                  string = "We've updated your location. ";
+                  details += "Your new location is " + bodyObj.coordinates.lat + ", " + bodyObj.coordinates.lng + ". The time is " + (new Date(bodyObj.coordinates.created_at)).toTimeString() + ". ";
+                } else {
+                  string = "We were unable to update your location. ";
+                  details = JSON.stringify(body);
+                }
+                let response = {
+                  speech: string + details,
+                  displayText: string + details
+                };
+                if (requestSource === googleAssistantRequest) {
+                  sendGoogleResponse(response);
+                } else {
+                  sendResponse(response);
+                }
+              });
+            });
+            req.on('error', function(e) {
+              console.log('problem with request: ' + e.message);
+            });
+            req.write(requestData);
+            req.end();
+          }
         }
       }
     },
-    // The default welcome intent has been matched, welcome the user (https://dialogflow.com/docs/events#default_welcome_intent)
     'input.welcome': () => {
       // Use the Actions on Google lib to respond to Google requests; for other requests use JSON
+      let responseString = 'Hello, Welcome to SafeTrek Helper!';
       if (requestSource === googleAssistantRequest) {
-        sendGoogleResponse('Hello, Welcome to my Dialogflow agent!'); // Send simple response to user
+        sendGoogleResponse(responseString); // Send simple response to user
       } else {
-        sendResponse('Hello, Welcome to my Dialogflow agent!'); // Send simple response to user
+        sendResponse(responseString); // Send simple response to user
       }
     },
     // The default fallback intent has been matched, try to recover (https://dialogflow.com/docs/intents#fallback_intents)
     'input.unknown': () => {
       // Use the Actions on Google lib to respond to Google requests; for other requests use JSON
+      let responseString = 'I\'m having trouble, can you try that again?';
       if (requestSource === googleAssistantRequest) {
-        sendGoogleResponse('I\'m having trouble, can you try that again?'); // Send simple response to user
+        sendGoogleResponse(responseString); // Send simple response to user
       } else {
-        sendResponse('I\'m having trouble, can you try that again?'); // Send simple response to user
+        sendResponse(responseString); // Send simple response to user
       }
     },
     // Default handler for unknown or undefined actions
     'default': () => {
       // Use the Actions on Google lib to respond to Google requests; for other requests use JSON
+      let responseString = "We don't know how to handle your request.";
       if (requestSource === googleAssistantRequest) {
         let responseToUser = {
           //googleRichResponse: googleRichResponse, // Optional, uncomment to enable
           //googleOutputContexts: ['weather', 2, { ['city']: 'rome' }], // Optional, uncomment to enable
-          speech: 'This message is from Dialogflow\'s Cloud Functions for Firebase editor!', // spoken response
-          text: 'This is from Dialogflow\'s Cloud Functions for Firebase editor! :-)' // displayed response
+          speech: responseString, // spoken response
+          text: responseString // displayed response
         };
         sendGoogleResponse(responseToUser);
       } else {
         let responseToUser = {
           //data: richResponsesV1, // Optional, uncomment to enable
           //outputContexts: [{'name': 'weather', 'lifespan': 2, 'parameters': {'city': 'Rome'}}], // Optional, uncomment to enable
-          speech: 'This message is from Dialogflow\'s Cloud Functions for Firebase editor!', // spoken response
-          text: 'This is from Dialogflow\'s Cloud Functions for Firebase editor! :-)' // displayed response
+          speech: responseString, // spoken response
+          text: responseString // displayed response
         };
         sendResponse(responseToUser);
       }
@@ -386,274 +426,3 @@ const richResponsesV1 = {
     }
   }
 };
-/*
- * Function to handle v2 webhook requests from Dialogflow
- */
-// function processV2Request(request, response) {
-//   // An action is a string used to identify what needs to be done in fulfillment
-//   let action = (request.body.queryResult.action) ? request.body.queryResult.action : 'default';
-//   // Parameters are any entites that Dialogflow has extracted from the request.
-//   let parameters = request.body.queryResult.parameters || {}; // https://dialogflow.com/docs/actions-and-parameters
-//   // Contexts are objects used to track and store conversation state
-//   let inputContexts = request.body.queryResult.contexts; // https://dialogflow.com/docs/contexts
-//   // Get the request source (Google Assistant, Slack, API, etc)
-//   let requestSource = (request.body.originalDetectIntentRequest) ? request.body.originalDetectIntentRequest.source : undefined;
-//   // Get the session ID to differentiate calls from different users
-//   let session = (request.body.session) ? request.body.session : undefined;
-//   const googleAssistantRequest = 'google'; // Constant to identify Google Assistant requests
-//   const app = new DialogflowApp({request: request, response: response});
-//   let access_token = app.getUser().access_token;
-//   // Create handlers for Dialogflow actions as well as a 'default' handler
-//   const actionHandlers = {
-//     'signin': () => {
-//       console.log('signin');
-//       if (requestSource === googleAssistantRequest) {
-//         sendGoogleResponse('This is the signin action');
-//       } else {
-//         sendResponse('This is the signin action');
-//       }
-//     },
-//     'create.alarm': () => {
-//       console.log('create.alarm');
-//       createAlarm(access_token);
-//       if (requestSource === googleAssistantRequest) {
-//         sendGoogleResponse('This is the create alarm action');
-//       } else {
-//         sendResponse('This is the create alarm action');
-//       }
-//     },
-//     'update.alarm.status': () => {
-//       console.log('update.alarm.status');
-//       updateAlarmStatus(access_token);
-//       if (requestSource === googleAssistantRequest) {
-//         sendGoogleResponse('This is the update alarm status action');
-//       } else {
-//         sendResponse('This is the update alarm action action');
-//       }
-//     },
-//     // The default welcome intent has been matched, welcome the user (https://dialogflow.com/docs/events#default_welcome_intent)
-//     'input.welcome': () => {
-//       console.log('input.welcome');
-//       sendResponse('Hello, Welcome to my Dialogflow agent!'); // Send simple response to user
-//     },
-//     // The default fallback intent has been matched, try to recover (https://dialogflow.com/docs/intents#fallback_intents)
-//     'input.unknown': () => {
-//       console.log('input.unknown');
-//       // Use the Actions on Google lib to respond to Google requests; for other requests use JSON
-//       sendResponse('I\'m having trouble, can you try that again?'); // Send simple response to user
-//     },
-//     // Default handler for unknown or undefined actions
-//     'default': () => {
-//       let responseToUser = {
-//         //fulfillmentMessages: richResponsesV2, // Optional, uncomment to enable
-//         //outputContexts: [{ 'name': `${session}/contexts/weather`, 'lifespanCount': 2, 'parameters': {'city': 'Rome'} }], // Optional, uncomment to enable
-//         fulfillmentText: 'This is from Dialogflow\'s Cloud Functions for Firebase editor! :-)' // displayed response
-//       };
-//       sendResponse(responseToUser);
-//     }
-//   };
-//   // If undefined or unknown action use the default handler
-//   if (!actionHandlers[action]) {
-//     action = 'default';
-//   }
-//   // Run the proper handler function to handle the request from Dialogflow
-//   actionHandlers[action]();
-//   // Function to send correctly formatted responses to Dialogflow which are then sent to the user
-//   function sendResponse(responseToUser) {
-//     // if the response is a string send it as a response to the user
-//     if (typeof responseToUser === 'string') {
-//       let responseJson = {
-//         fulfillmentText: responseToUser
-//       }; // displayed response
-//       response.json(responseJson); // Send response to Dialogflow
-//     } else {
-//       // If the response to the user includes rich responses or contexts send them to Dialogflow
-//       let responseJson = {};
-//       // Define the text response
-//       responseJson.fulfillmentText = responseToUser.fulfillmentText;
-//       // Optional: add rich messages for integrations (https://dialogflow.com/docs/rich-messages)
-//       if (responseToUser.fulfillmentMessages) {
-//         responseJson.fulfillmentMessages = responseToUser.fulfillmentMessages;
-//       }
-//       // Optional: add contexts (https://dialogflow.com/docs/contexts)
-//       if (responseToUser.outputContexts) {
-//         responseJson.outputContexts = responseToUser.outputContexts;
-//       }
-//       // Send the response to Dialogflow
-//       console.log('Response to Dialogflow: ' + JSON.stringify(responseJson));
-//       response.json(responseJson);
-//     }
-//   }
-// }
-// const richResponseV2Card = {
-//   'title': 'Title: this is a title',
-//   'subtitle': 'This is an subtitle.  Text can include unicode characters including emoji 📱.',
-//   'imageUri': 'https://developers.google.com/actions/images/badges/XPM_BADGING_GoogleAssistant_VER.png',
-//   'buttons': [{
-//     'text': 'This is a button',
-//     'postback': 'https://assistant.google.com/'
-//   }]
-// };
-// const richResponsesV2 = [{
-//     'platform': 'ACTIONS_ON_GOOGLE',
-//     'simple_responses': {
-//       'simple_responses': [{
-//         'text_to_speech': 'Spoken simple response',
-//         'display_text': 'Displayed simple response'
-//       }]
-//     }
-//   },
-//   {
-//     'platform': 'ACTIONS_ON_GOOGLE',
-//     'basic_card': {
-//       'title': 'Title: this is a title',
-//       'subtitle': 'This is an subtitle.',
-//       'formatted_text': 'Body text can include unicode characters including emoji 📱.',
-//       'image': {
-//         'image_uri': 'https://developers.google.com/actions/images/badges/XPM_BADGING_GoogleAssistant_VER.png'
-//       },
-//       'buttons': [{
-//         'title': 'This is a button',
-//         'open_uri_action': {
-//           'uri': 'https://assistant.google.com/'
-//         }
-//       }]
-//     }
-//   },
-//   {
-//     'platform': 'FACEBOOK',
-//     'card': richResponseV2Card
-//   },
-//   {
-//     'platform': 'SLACK',
-//     'card': richResponseV2Card
-//   }
-// ];
-
-function createAlarm(app) {
-  let deviceCoordinates = app.getDeviceLocation().coordinates;
-  console.log(deviceCoordinates);
-  let requestData = JSON.stringify({
-    "services": {
-      "police": true,
-      "fire": false,
-      "medical": false
-    },
-    "location.coordinates": {
-      "lat": deviceCoordinates.latitude,
-      "lng": deviceCoordinates.longitude,
-      "accuracy": 5
-    }
-  });
-  let options = {
-    // hostname: "https://api.safetrek.io/v1/alarms",
-    hostname: "api-sandbox.safetrek.io",
-    path: "/v1/alarms",
-    method: "POST",
-    headers: {
-      "Authorization": "Bearer " + app.getUser().access_token,
-      "Content-Type": "application/json",
-    }
-  };
-  let req = https.request(options, function(res) {
-    res.setEncoding('utf8');
-    res.on('data', function(body) {
-      console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
-      // if (res.statusCode == 201) {
-      console.log("THIS IS A TEST CAN YOU HEAR ME");
-      console.log("Body 201: ", JSON.parse(body));
-      let id = JSON.parse(body).id;
-      console.log("ID 201: ", id);
-      console.log("User storage:", app.userStorage);
-      app.userStorage.id = id;
-      console.log("User storage ID:", app.userStorage.id);
-      console.log("User storage 2:", app.userStorage);
-      // }
-    });
-  });
-  console.log("Request", req);
-  console.log("Request data", requestData);
-  req.on('error', function(e) {
-    console.log('problem with request: ' + e.message);
-  });
-  // write data to request body
-  req.write(requestData);
-  req.end();
-}
-
-function updateAlarmLocation(app) {
-  let deviceCoordinates = app.getDeviceLocation().coordinates;
-  console.log(deviceCoordinates);
-  let requestData = JSON.stringify({
-    "coordinates": {
-      "lat": deviceCoordinates.latitude,
-      "lng": deviceCoordinates.longitude,
-      "accuracy": 5
-    }
-  });
-  let options = {
-    // hostname: "https://api.safetrek.io/v1/alarms",
-    hostname: "api-sandbox.safetrek.io",
-    path: "/v1/alarms/" + app.userStorage.id + "/locations",
-    method: "POST",
-    headers: {
-      "Authorization": "Bearer " + app.getUser().access_token,
-      "Content-Type": "application/json"
-    }
-  };
-  let req = https.request(options, function(res) {
-    // 200
-    console.log('Status: ' + res.statusCode);
-    console.log('Headers: ' + JSON.stringify(res.headers));
-    res.setEncoding('utf8');
-    res.on('data', function(body) {
-      console.log('Body: ' + body);
-      return body.toString();
-    });
-  });
-  req.on('error', function(e) {
-    console.log('problem with request: ' + e.message);
-  });
-  // write data to request body
-  req.write(requestData);
-  req.end();
-}
-
-function updateAlarmStatus(app) {
-  console.log("User storage 3:", app.userStorage);
-  console.log("User storage ID:", app.userStorage.id);
-  console.log("User storage 4:", app.userStorage);
-  if (!app.userStorage.id) {
-    console.log("ID NULL FAILURE");
-  } else {
-    let requestData = JSON.stringify({
-      "status": "CANCELED"
-    });
-    let options = {
-      // hostname: "https://api.safetrek.io/v1/alarms",
-      hostname: "api-sandbox.safetrek.io",
-      path: "/v1/alarms/" + app.userStorage.id + "/status",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + app.getUser().access_token,
-      }
-    };
-    let req = https.request(options, function(res) {
-      // 200
-      console.log('Status: ' + res.statusCode);
-      console.log('Headers: ' + JSON.stringify(res.headers));
-      res.setEncoding('utf8');
-      res.on('data', function(body) {
-        console.log('Body: ' + body);
-        return body.toString();
-      });
-    });
-    req.on('error', function(e) {
-      console.log('problem with request: ' + e.message);
-    });
-    // write data to request body
-    req.write(requestData);
-    req.end();
-  }
-}
