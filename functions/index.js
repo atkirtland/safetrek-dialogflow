@@ -18,6 +18,8 @@ exports.dialogflowFirebaseFulfillment = functions.https.onRequest((request, resp
     return response.status(400).end('Invalid Webhook Request (expecting v1 or v2 webhook request)');
   }
 });
+
+
 /*
  * Function to handle v1 webhook requests from Dialogflow
  */
@@ -28,11 +30,11 @@ function processV1Request(request, response) {
   let inputContexts = request.body.result.contexts; // https://dialogflow.com/docs/contexts
   let requestSource = (request.body.originalRequest) ? request.body.originalRequest.source : undefined;
   const googleAssistantRequest = 'google'; // Constant to identify Google Assistant requests
-  const app = new DialogflowApp({
+  const actionsApp = new ActionsSdkApp({
     request: request,
     response: response
   });
-  const actionsApp = new ActionsSdkApp({
+  const app = new DialogflowApp({
     request: request,
     response: response
   });
@@ -67,71 +69,13 @@ function processV1Request(request, response) {
           app.userStorage.previous_intent = "create.alarm";
           app.askForPermission('To locate you', app.SupportedPermissions.DEVICE_PRECISE_LOCATION);
         } else {
-          let deviceCoordinates = app.getDeviceLocation().coordinates;
-          let p = parameters.type ? parameters : app.userStorage.parameters;
-          let police = p['type'].includes('police');
-          let fire = p['type'].includes('fire');
-          let medical = p['type'].includes('medical');
-          if (!(police || fire || medical)) {
-            police = true;
-          }
-          let requestData = JSON.stringify({
-            "services": {
-              "police": police,
-              "fire": fire,
-              "medical": medical
-            },
-            "location.coordinates": {
-              "lat": deviceCoordinates.latitude,
-              "lng": deviceCoordinates.longitude,
-              "accuracy": 5
-            }
-          });
-          let options = {
-            // hostname: "https://api.safetrek.io/v1/alarms",
-            hostname: "api-sandbox.safetrek.io",
-            path: "/v1/alarms",
-            method: "POST",
-            headers: {
-              "Authorization": "Bearer " + app.getUser().access_token,
-              "Content-Type": "application/json",
-            }
-          };
-          let req = https.request(options, function(res) {
-            res.setEncoding('utf8');
-            res.on('data', function(body) {
-              let bodyObj = JSON.parse(body);
-              app.userStorage.id = bodyObj.id;
-              var string;
-              var details = "";
-              console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
-              if (res.statusCode == 201) {
-                string = "We have sent help. ";
-                details += "The following services are coming:" + (bodyObj.services.police ? " police" : "") + (bodyObj.services.fire ? " fire" : "") + (bodyObj.services.medical ? " medical" : "") + ". ";
-                details += "You location is: " + bodyObj.locations.coordinates[0].lat + ", " + bodyObj.locations.coordinates[0].lng + ". ";
-                details += "This alarm was created at " + (new Date(bodyObj.created_at)).toString() + ". ";
-              } else {
-                string = "There's an error creating the alarm.";
-                details = JSON.stringify(body);
-              }
-              response = {
-                speech: string + details,
-                displayText: string + details
-              };
-              if (requestSource === googleAssistantRequest) {
-                sendGoogleResponse(response);
-              } else {
-                sendResponse(response);
-              }
-            });
-          });
-          req.on('error', function(e) {
-            console.log('problem with request: ' + e.message);
-          });
-          req.write(requestData);
-          req.end();
+          actionHandlers['createAlarm']();
+          // createAlarm(app, requestSource, parameters);
         }
       }
+    },
+    'logme': () => {
+      console.log("hello");
     },
     'user.info': () => {
       if (app.isPermissionGranted()) {
@@ -185,6 +129,8 @@ function processV1Request(request, response) {
                 var details = "";
                 if (res.statusCode == 200) {
                   string = "We've canceled your alarm. Thank you for using SafeTrek to stay out of danger. ";
+                  console.log("Cancelling timer...", app.userStorage);
+                  clearInterval(app.userStorage.timer);
                 } else {
                   console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
                   string = "We were unable to cancel your alarm. ";
@@ -220,58 +166,8 @@ function processV1Request(request, response) {
           app.userStorage.previous_intent = "update.alarm.location";
           app.askForPermission('To locate you', app.SupportedPermissions.DEVICE_PRECISE_LOCATION);
         } else {
-          let deviceCoordinates = app.getDeviceLocation().coordinates;
-          if (!app.userStorage.id) {
-            console.log("ID NULL FAILURE");
-          } else {
-            let requestData = JSON.stringify({
-              "coordinates": {
-                "lat": deviceCoordinates.latitude,
-                "lng": deviceCoordinates.longitude,
-                "accuracy": 5
-              }
-            });
-            let options = {
-              // hostname: "https://api.safetrek.io/v1/alarms",
-              hostname: "api-sandbox.safetrek.io",
-              path: "/v1/alarms/" + app.userStorage.id + "/locations",
-              method: "POST",
-              headers: {
-                "Authorization": "Bearer " + app.getUser().access_token,
-                "Content-Type": "application/json"
-              }
-            };
-            let req = https.request(options, function(res) {
-              res.setEncoding('utf8');
-              res.on('data', function(body) {
-                let bodyObj = JSON.parse(body);
-                var string;
-                var details = "";
-                console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
-                if (res.statusCode == 200) {
-                  string = "We've updated your location. ";
-                  details += "Your new location is " + bodyObj.coordinates.lat + ", " + bodyObj.coordinates.lng + ". The time is " + (new Date(bodyObj.coordinates.created_at)).toTimeString() + ". ";
-                } else {
-                  string = "We were unable to update your location. ";
-                  details = JSON.stringify(body);
-                }
-                let response = {
-                  speech: string + details,
-                  displayText: string + details
-                };
-                if (requestSource === googleAssistantRequest) {
-                  sendGoogleResponse(response);
-                } else {
-                  sendResponse(response);
-                }
-              });
-            });
-            req.on('error', function(e) {
-              console.log('problem with request: ' + e.message);
-            });
-            req.write(requestData);
-            req.end();
-          }
+          // updateAlarmLocation(app, requestSource, true);
+          actionHandlers['updateAlarmLocation'](true);
         }
       }
     },
@@ -293,6 +189,134 @@ function processV1Request(request, response) {
       } else {
         sendResponse(responseString); // Send simple response to user
       }
+    },
+    'updateAlarmLocation': (sendResponse) => {
+      sendResponse = sendResponse || false;
+      let deviceCoordinates = app.getDeviceLocation().coordinates;
+      if (!app.userStorage.id) {
+        console.log("ID NULL FAILURE");
+      } else {
+        let requestData = JSON.stringify({
+          "coordinates": {
+            "lat": deviceCoordinates.latitude,
+            "lng": deviceCoordinates.longitude,
+            "accuracy": 5
+          }
+        });
+        let options = {
+          // hostname: "https://api.safetrek.io/v1/alarms",
+          hostname: "api-sandbox.safetrek.io",
+          path: "/v1/alarms/" + app.userStorage.id + "/locations",
+          method: "POST",
+          headers: {
+            "Authorization": "Bearer " + app.getUser().access_token,
+            "Content-Type": "application/json"
+          }
+        };
+        let req = https.request(options, function(res) {
+          res.setEncoding('utf8');
+          res.on('data', function(body) {
+            let bodyObj = JSON.parse(body);
+            var string;
+            var details = "";
+            console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
+            if (res.statusCode == 200) {
+              string = "We've updated your location. ";
+              details += "Your new location is " + bodyObj.coordinates.lat + ", " + bodyObj.coordinates.lng + ". The time is " + (new Date(bodyObj.coordinates.created_at)).toTimeString() + ". ";
+            } else {
+              string = "We were unable to update your location. ";
+              details = JSON.stringify(body);
+            }
+            let response = {
+              speech: string + details,
+              displayText: string + details
+            };
+            if (sendResponse) {
+              if (requestSource === googleAssistantRequest) {
+                sendGoogleResponse(response);
+              } else {
+                sendResponse(response);
+              }
+
+            }
+          });
+        });
+        req.on('error', function(e) {
+          console.log('problem with request: ' + e.message);
+        });
+        req.write(requestData);
+        req.end();
+      }
+    },
+    'createAlarm': () => {
+      let deviceCoordinates = app.getDeviceLocation().coordinates;
+      let p = parameters.type ? parameters : app.userStorage.parameters;
+      let police = p['type'].includes('police');
+      let fire = p['type'].includes('fire');
+      let medical = p['type'].includes('medical');
+      if (!(police || fire || medical)) {
+        police = true;
+      }
+      let requestData = JSON.stringify({
+        "services": {
+          "police": police,
+          "fire": fire,
+          "medical": medical
+        },
+        "location.coordinates": {
+          "lat": deviceCoordinates.latitude,
+          "lng": deviceCoordinates.longitude,
+          "accuracy": 5
+        }
+      });
+      let options = {
+        // hostname: "https://api.safetrek.io/v1/alarms",
+        hostname: "api-sandbox.safetrek.io",
+        path: "/v1/alarms",
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + app.getUser().access_token,
+          "Content-Type": "application/json",
+        }
+      };
+      let req = https.request(options, function(res) {
+        res.setEncoding('utf8');
+        res.on('data', function(body) {
+          let bodyObj = JSON.parse(body);
+          app.userStorage.id = bodyObj.id;
+          var string;
+          var details = "";
+          console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
+          if (res.statusCode == 201) {
+            string = "We have sent help. ";
+            details += "The following services are coming:" + (bodyObj.services.police ? " police" : "") + (bodyObj.services.fire ? " fire" : "") + (bodyObj.services.medical ? " medical" : "") + ". ";
+            details += "You location is: " + bodyObj.locations.coordinates[0].lat + ", " + bodyObj.locations.coordinates[0].lng + ". ";
+            details += "This alarm was created at " + (new Date(bodyObj.created_at)).toString() + ". ";
+          } else {
+            string = "There's an error creating the alarm.";
+            details = JSON.stringify(body);
+          }
+          let response = { // TODO this could be the source of the problems..
+            speech: string + details,
+            displayText: string + details
+          };
+          setInterval(actionHandlers['updateAlarmLocation'], 10 * 1000);
+          if (requestSource === googleAssistantRequest) {
+            sendGoogleResponse(response);
+          } else {
+            sendResponse(response);
+          }
+        });
+      });
+      req.on('error', function(e) {
+        console.log('problem with request: ' + e.message);
+      });
+      req.write(requestData);
+      req.end();
+      // setInterval(function() {
+      //   console.log("hello");
+      // }, 10 * 1000);
+      // setInterval(actionHandlers['updateAlarmLocation'], 10 * 1000, app, requestSource);
     },
     // Default handler for unknown or undefined actions
     'default': () => {
@@ -368,8 +392,9 @@ function processV1Request(request, response) {
     }
   }
 }
-// Construct rich response for Google Assistant (v1 requests only)
 const app = new DialogflowApp();
+
+// Construct rich response for Google Assistant (v1 requests only)
 const googleRichResponse = app.buildRichResponse()
   .addSimpleResponse('This is the first simple response for Google Assistant')
   .addSuggestions(
@@ -426,3 +451,132 @@ const richResponsesV1 = {
     }
   }
 };
+
+// function createAlarm(app, requestSource, parameters) {
+//   let deviceCoordinates = app.getDeviceLocation().coordinates;
+//   let p = parameters.type ? parameters : app.userStorage.parameters;
+//   let police = p['type'].includes('police');
+//   let fire = p['type'].includes('fire');
+//   let medical = p['type'].includes('medical');
+//   if (!(police || fire || medical)) {
+//     police = true;
+//   }
+//   let requestData = JSON.stringify({
+//     "services": {
+//       "police": police,
+//       "fire": fire,
+//       "medical": medical
+//     },
+//     "location.coordinates": {
+//       "lat": deviceCoordinates.latitude,
+//       "lng": deviceCoordinates.longitude,
+//       "accuracy": 5
+//     }
+//   });
+//   let options = {
+//     // hostname: "https://api.safetrek.io/v1/alarms",
+//     hostname: "api-sandbox.safetrek.io",
+//     path: "/v1/alarms",
+//     method: "POST",
+//     headers: {
+//       "Authorization": "Bearer " + app.getUser().access_token,
+//       "Content-Type": "application/json",
+//     }
+//   };
+//   let req = https.request(options, function(res) {
+//     res.setEncoding('utf8');
+//     res.on('data', function(body) {
+//       let bodyObj = JSON.parse(body);
+//       app.userStorage.id = bodyObj.id;
+//       var string;
+//       var details = "";
+//       console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
+//       if (res.statusCode == 201) {
+//         string = "We have sent help. ";
+//         details += "The following services are coming:" + (bodyObj.services.police ? " police" : "") + (bodyObj.services.fire ? " fire" : "") + (bodyObj.services.medical ? " medical" : "") + ". ";
+//         details += "You location is: " + bodyObj.locations.coordinates[0].lat + ", " + bodyObj.locations.coordinates[0].lng + ". ";
+//         details += "This alarm was created at " + (new Date(bodyObj.created_at)).toString() + ". ";
+//       } else {
+//         string = "There's an error creating the alarm.";
+//         details = JSON.stringify(body);
+//       }
+//       let response = { // TODO this could be the source of the problems..
+//         speech: string + details,
+//         displayText: string + details
+//       };
+//       if (requestSource === googleAssistantRequest) {
+//         sendGoogleResponse(response);
+//       } else {
+//         sendResponse(response);
+//       }
+//     });
+//   });
+//   req.on('error', function(e) {
+//     console.log('problem with request: ' + e.message);
+//   });
+//   req.write(requestData);
+//   req.end();
+//   // setInterval(function() {
+//   //   console.log("hello");
+//   // }, 10 * 1000);
+//   setInterval(updateAlarmLocation, 10 * 1000, app, requestSource);
+// }
+//
+// function updateAlarmLocation(app, requestSource, sendResponse) {
+//   sendResponse = sendResponse || false;
+//   let deviceCoordinates = app.getDeviceLocation().coordinates;
+//   if (!app.userStorage.id) {
+//     console.log("ID NULL FAILURE");
+//   } else {
+//     let requestData = JSON.stringify({
+//       "coordinates": {
+//         "lat": deviceCoordinates.latitude,
+//         "lng": deviceCoordinates.longitude,
+//         "accuracy": 5
+//       }
+//     });
+//     let options = {
+//       // hostname: "https://api.safetrek.io/v1/alarms",
+//       hostname: "api-sandbox.safetrek.io",
+//       path: "/v1/alarms/" + app.userStorage.id + "/locations",
+//       method: "POST",
+//       headers: {
+//         "Authorization": "Bearer " + app.getUser().access_token,
+//         "Content-Type": "application/json"
+//       }
+//     };
+//     let req = https.request(options, function(res) {
+//       res.setEncoding('utf8');
+//       res.on('data', function(body) {
+//         let bodyObj = JSON.parse(body);
+//         var string;
+//         var details = "";
+//         console.log("Status: ", res.statusCode, "Headers: ", JSON.stringify(res.headers), "Body: ", body);
+//         if (res.statusCode == 200) {
+//           string = "We've updated your location. ";
+//           details += "Your new location is " + bodyObj.coordinates.lat + ", " + bodyObj.coordinates.lng + ". The time is " + (new Date(bodyObj.coordinates.created_at)).toTimeString() + ". ";
+//         } else {
+//           string = "We were unable to update your location. ";
+//           details = JSON.stringify(body);
+//         }
+//         let response = {
+//           speech: string + details,
+//           displayText: string + details
+//         };
+//         if (sendResponse) {
+//           if (requestSource === googleAssistantRequest) {
+//             sendGoogleResponse(response);
+//           } else {
+//             sendResponse(response);
+//           }
+//
+//         }
+//       });
+//     });
+//     req.on('error', function(e) {
+//       console.log('problem with request: ' + e.message);
+//     });
+//     req.write(requestData);
+//     req.end();
+//   }
+// }
